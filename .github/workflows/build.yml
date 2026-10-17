@@ -1,0 +1,74 @@
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract project zip
+        run: |
+          Z=$(find . -name "*.zip" -not -path "./.git/*" | head -n 1)
+          if [ -z "$Z" ]; then echo "no zip found in repo"; exit 1; fi
+          echo "zip: $Z"
+          rm -rf proj && mkdir proj
+          unzip -q "$Z" -d proj
+          S=$(find proj \( -name settings.gradle.kts -o -name settings.gradle \) -not -path "*/build/*" | head -n 1)
+          if [ -z "$S" ]; then echo "no settings.gradle found inside zip"; exit 1; fi
+          PDIR=$(dirname "$S")
+          echo "PDIR=$PDIR" >> "$GITHUB_ENV"
+          echo "project dir: $PDIR"
+          ls -la "$PDIR"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install Android SDK packages
+        run: |
+          SDKM=$(find "$ANDROID_HOME" -path "*cmdline-tools*" -name sdkmanager -type f | head -n 1)
+          if [ -z "$SDKM" ]; then echo "sdkmanager not found in $ANDROID_HOME"; exit 1; fi
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          "$SDKM" "platforms;android-35" "platforms;android-36" "build-tools;35.0.0" "build-tools;36.0.0" \
+            || "$SDKM" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Force JVM 21 target
+        run: |
+          cd "$PDIR"
+          for F in app/build.gradle.kts app/build.gradle; do
+            [ -f "$F" ] || continue
+            if ! grep -q "VERSION_21" "$F"; then
+              printf '\nandroid {\n    compileOptions {\n        sourceCompatibility = JavaVersion.VERSION_21\n        targetCompatibility = JavaVersion.VERSION_21\n    }\n}\n\nkotlin {\n    jvmToolchain(21)\n}\n' >> "$F"
+              echo "patched $F"
+            fi
+          done
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Build debug APK
+        run: |
+          cd "$PDIR"
+          chmod +x gradlew 2>/dev/null || true
+          if [ -f gradlew ]; then
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          else
+            gradle assembleDebug --no-daemon --stacktrace
+          fi
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: vyron-apk
+          path: proj/**/build/outputs/apk/**/*.apk
+          if-no-files-found: error
